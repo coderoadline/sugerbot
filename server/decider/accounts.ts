@@ -9,6 +9,8 @@ import { WORKERS_AI_DEFAULT_BASE_URL } from "./workers-ai.ts";
 
 export interface HelperAccount extends ServiceCredential {
   provider: DeciderProvider;
+  /** Jev only: the model id this gateway serves. */
+  model?: string;
   /** Workers AI: the Cloudflare account the token belongs to. */
   accountId?: string;
   /** OpenRouter: the decision model's own key, or the engine's from Settings → API keys. */
@@ -42,7 +44,8 @@ export function jevAccount(cfg: AppConfig, draft?: string): HelperAccount | null
   const own = draft?.trim() || cfg.decider?.key?.trim();
   if (!own) return null;
   const credential = deciderCredential(own, cfg.decider?.baseUrl);
-  return credential ? { ...credential, provider: "jev" } : null;
+  const model = cfg.decider?.jevModel?.trim();
+  return credential ? { ...credential, provider: "jev" as const, ...(model ? { model } : {}) } : null;
 }
 
 /** Cloud's included relay, a Jev base URL whose `/v1/extract` also extracts. */

@@ -84,6 +84,9 @@ export function describeDecider(cfg: AppConfig) {
   return {
     provider,
     ...(provider === "openrouter" ? { model: deciderModel(cfg), api: deciderApi(cfg) } : {}),
+    ...(provider === "jev"
+      ? { baseUrl: cfg.decider?.baseUrl ?? "", jevModel: cfg.decider?.jevModel ?? "" }
+      : {}),
     configured: Boolean(account),
     ...(account?.keySource ? { keySource: account.keySource } : {}),
     ...(provider === "openrouter" && deciderSharedKeyUsable(cfg) ? { sharedKey: true as const } : {}),
@@ -254,6 +257,7 @@ export function createDecider(deps: DeciderDeps): Decider {
         .then(() => backend.decide({
           key: account.token,
           baseUrl: account.api,
+          ...(account.model ? { model: account.model } : {}),
           ...(account.accountId ? { accountId: account.accountId } : {}),
           ...(options.careful ? { careful: true } : {}),
           ...(account.included ? { relaySeam: seam } : {}),

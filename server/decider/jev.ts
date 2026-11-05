@@ -46,7 +46,7 @@ type WireQuestion =
   | { type: "score"; instructions: string; criteria: string[] }
   | { type: "noul"; instructions: string; criteria?: { true?: string; false?: string } };
 
-export function jevRequestBody(state: unknown, questions: Record<string, DeciderQuestion>) {
+export function jevRequestBody(state: unknown, questions: Record<string, DeciderQuestion>, model?: string | null) {
   const wire: Record<string, WireQuestion> = {};
   for (const [id, question] of Object.entries(questions)) {
     if (question.type === "choice") {
@@ -60,7 +60,7 @@ export function jevRequestBody(state: unknown, questions: Record<string, Decider
       wire[id] = { type: "noul", instructions: question.instructions, ...(criteria ? { criteria } : {}) };
     }
   }
-  return { state, model: JEV_MODEL, questions: wire };
+  return { state, model: model?.trim() || JEV_MODEL, questions: wire };
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -158,7 +158,7 @@ async function decide(request: BackendRequest): Promise<BackendResult> {
         // The relay checks the request against this seam's shape (server/decider/relay.ts); Jev itself never sees it.
         ...(request.relaySeam ? { [RELAY_SEAM_HEADER]: request.relaySeam } : {}),
       },
-      body: JSON.stringify(jevRequestBody(request.state, request.questions)),
+      body: JSON.stringify(jevRequestBody(request.state, request.questions, request.model)),
       signal: request.signal,
       // Never replay the key to wherever a redirect points.
       redirect: "error",

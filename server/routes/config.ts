@@ -1,3 +1,6 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as nodePath from "node:path";
 import * as boat from "../boat.ts";
 import { boatCreateRecoverySnapshot, retireDeletedBoatCreate } from "../boat-create-idempotency.ts";
 import { boatDeletionSnapshot } from "../boat-delete-journal.ts";
@@ -115,6 +118,111 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
     // API keys are never echoed back: booleans only.
     if (method === "GET" && path === "/api/config") {
       return json(res, 200, configForAccess(configStatus(), auth));
+    }
+    // A third-party LLM provider for DeepSeek Harness: dsh owns its provider table, so this writes one
+    // patch entry into the profile's patch layer (~/.dsh/profiles/acp/cordis.patch.yml).
+    if (method === "POST" && path === "/api/dsh-provider") {
+      const body = (await readBody(req)) as {
+        provider?: unknown; displayName?: unknown; api?: unknown; baseUrl?: unknown;
+        apiKeyEnv?: unknown; models?: unknown; key?: unknown;
+      };
+      const provider = typeof body.provider === "string" ? body.provider.trim() : "";
+      const baseUrl = typeof body.baseUrl === "string" ? body.baseUrl.trim() : "";
+      const api = typeof body.api === "string" ? body.api : "";
+      const apiKeyEnv = typeof body.apiKeyEnv === "string" ? body.apiKeyEnv.trim() : "";
+      const displayName = typeof body.displayName === "string" ? body.displayName.trim() : provider;
+      const models = Array.isArray(body.models) ? body.models : [];
+      if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(provider)) return json(res, 400, { error: "provider id: lowercase letters, digits and dashes" });
+      if (!/^https?:\/\//.test(baseUrl)) return json(res, 400, { error: "base URL must start with http(s)://" });
+      if (!["openai-completions", "openai-responses", "anthropic-messages"].includes(api)) return json(res, 400, { error: "api must be openai-completions, openai-responses or anthropic-messages" });
+      if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(apiKeyEnv)) return json(res, 400, { error: "apiKeyEnv must be an UPPER_CASE variable name" });
+      if (!models.length) return json(res, 400, { error: "at least one model id" });
+      const list = models.flatMap((entry) => {
+        const row = (entry ?? {}) as { id?: unknown; name?: unknown; contextWindow?: unknown };
+        const id = typeof row.id === "string" ? row.id.trim() : "";
+        if (!id) return [];
+        return [{
+          id,
+          ...(typeof row.name === "string" && row.name.trim() ? { name: row.name.trim() } : {}),
+          ...(typeof row.contextWindow === "number" && row.contextWindow > 0 ? { contextWindow: Math.round(row.contextWindow) } : {}),
+        }];
+      });
+      if (!list.length) return json(res, 400, { error: "model ids cannot be empty" });
+      const fs = await import("node:fs");
+      const path2 = await import("node:path");
+      const os = await import("node:os");
+      const yaml = await import("yaml");
+      const home = process.env.DSH_HOME?.trim() || path2.join(os.homedir(), ".dsh");
+      const file = path2.join(home, "profiles", "acp", "cordis.patch.yml");
+      fs.mkdirSync(path2.dirname(file), { recursive: true });
+      let entries: unknown[] = [];
+      try {
+        const parsed = yaml.parse(fs.readFileSync(file, "utf8"));
+        if (Array.isArray(parsed)) entries = parsed;
+      } catch { entries = []; }
+      const target = entries.find((entry) => Boolean(entry) && typeof entry === "object" && !Array.isArray(entry)
+        && (entry as { id?: unknown }).id === "llm-pi-ai") as { config?: Record<string, unknown> } | undefined;
+      const slot = target ?? { id: "llm-pi-ai", config: {} };
+      if (!target) entries.push(slot);
+      const config = (slot.config ?? {}) as Record<string, unknown>;
+      const providers = { ...((config.providers ?? {}) as Record<string, unknown>) };
+      providers[provider] = { displayName, api, baseURL: baseUrl, apiKeyEnv, models: list };
+      slot.config = { ...config, providers };
+      fs.writeFileSync(file, yaml.stringify(entries), { mode: 0o600 });
+      // dsh reads $DSH_HOME/.env itself, so the key reaches it on the catalog probe too,
+      // where the server starts the process without this instance's environment.
+      const credentials = typeof body.key === "string" ? body.key.trim() : "";
+      if (credentials) {
+        const envFile = path2.join(home, ".env");
+        let lines: string[] = [];
+        try {
+          lines = fs.readFileSync(envFile, "utf8").split(String.fromCharCode(10)).filter((line) => line && !line.startsWith(apiKeyEnv + "="));
+        } catch {
+          lines = [];
+        }
+        lines.push(apiKeyEnv + "=" + credentials);
+        fs.writeFileSync(envFile, lines.join(String.fromCharCode(10)) + String.fromCharCode(10), { mode: 0o600 });
+      }
+      return json(res, 200, { ok: true, file, provider });
+    }
+    // Model list of an arbitrary OpenAI-compatible gateway, fetched server-side: the browser cannot reach
+    // the server's loopback, and the key never leaves this process.
+    if (method === "GET" && path === "/api/gateway-models") {
+      const target = url.searchParams.get("url") ?? "";
+      // A saved provider keeps its key on this machine, so the form never has to send it back.
+      const providerId = url.searchParams.get("providerId") ?? "";
+      const stored = providerId && /^[a-z0-9][a-z0-9-]{0,40}$/.test(providerId)
+        ? (() => { try { return fs.readFileSync(nodePath.join(process.env.OMB_DATA_DIR?.trim() || nodePath.join(os.homedir(), ".openmausbot"), "secrets", "provider-" + providerId + ".key"), "utf8").trim(); } catch { return ""; } })()
+        : "";
+      const key = url.searchParams.get("key") || stored;
+      let parsed: URL;
+      try { parsed = new URL(target); } catch { return json(res, 400, { error: "url must be an absolute http(s) address" }); }
+      const loopback = parsed.hostname === "localhost" || parsed.hostname === "::1" || /^127\./.test(parsed.hostname);
+      if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && loopback)) {
+        return json(res, 400, { error: "plain http is only allowed on loopback" });
+      }
+      const endpoint = parsed.href.replace(/\/+$/, "") + "/models";
+      try {
+        const upstream = await fetch(endpoint, {
+          headers: key ? { authorization: "Bearer " + key, accept: "application/json" } : { accept: "application/json" },
+          signal: AbortSignal.timeout(20_000),
+          redirect: "error",
+        });
+        if (!upstream.ok) return json(res, 502, { error: "gateway answered " + upstream.status });
+        const body = (await upstream.json()) as { data?: Array<Record<string, unknown>> };
+        const models = (body.data ?? []).flatMap((row) => {
+          const id = typeof row.id === "string" ? row.id : "";
+          if (!id) return [];
+          const limits = ["context_length", "context_window", "max_model_len", "max_context_length"]
+            .map((name) => row[name]).filter((value): value is number => typeof value === "number" && value > 0);
+          return [{ id, ...(limits.length ? { contextWindow: Math.min(...limits) } : {}) }];
+        });
+        return json(res, 200, { models });
+      } catch (error) {
+        return json(res, 502, { error: error instanceof Error ? error.message : "gateway unreachable" });
+      }
+
+
     }
     if ((method === "PUT" || method === "PATCH") && path === "/api/config") {
       const body = await readBody(req);
@@ -532,15 +640,15 @@ export function createConfigRoutes(deps: ConfigRouteDeps): RouteHandler {
           if (persisted.live?.key !== undefined) persisted.live.key = "";
           if (persisted.treg?.key !== undefined) persisted.treg.key = "";
           if (persisted.postiz?.key !== undefined) persisted.postiz.key = "";
-          saveConfig(persisted);
+          saveConfig(persisted as unknown as Parameters<typeof saveConfig>[0]);
           configWriteCommitted = true;
-          syncCredentialEnv(patch);
+          syncCredentialEnv(patch as unknown as Parameters<typeof syncCredentialEnv>[0]);
           Object.assign(cfg, loadConfig());
         } else {
-          saveConfig(patch);
+          saveConfig(patch as unknown as Parameters<typeof saveConfig>[0]);
           configWriteCommitted = true;
           // loadConfig prefers env over the file for credentials, so the env must follow the save.
-          syncCredentialEnv(patch);
+          syncCredentialEnv(patch as unknown as Parameters<typeof syncCredentialEnv>[0]);
           Object.assign(cfg, loadConfig());
         }
       } catch (error) {

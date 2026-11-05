@@ -281,7 +281,7 @@ const instanceConfigSchema = z.object({
   access: z.enum(["subscription", "custom", "api"]).optional(),
   config: z.json().optional(),
 });
-const instanceConfigMapSchema = z.record(z.string(), instanceConfigSchema);
+const instanceConfigMapSchema = z.record(z.string(), instanceConfigSchema.nullable());
 const defaultModelSelectionSchema = z.object({
   instanceId: z.string().trim().min(1).max(200),
   model: z.string().trim().min(1).max(500),
@@ -461,7 +461,7 @@ const storedAppConfigSchema = appConfigSchema.extend(helperStoredShape).extend({
       .optional(),
   }).optional(),
 });
-const appConfigPatchSchema = appConfigSchema.omit({ instances: true, mcpServers: true, cliStartup: true, customDomain: true })
+const appConfigPatchSchema = appConfigSchema.omit({ mcpServers: true, cliStartup: true, customDomain: true })
   .extend({ threads: threadsPatchSchema.optional(), newBots: newBotsPatchSchema.optional() });
 const jsonObjectSchema = z.record(z.string(), z.json());
 
@@ -594,7 +594,11 @@ export function browserProfilePartitionTarget(
 export function parseStoredConfig(value: JsonValue): AppConfig {
   const parsed = storedAppConfigSchema.safeParse(value);
   if (!parsed.success) throw new Error(schemaIssue(parsed.error, "Invalid stored configuration"));
-  return parsed.data;
+  // A null engine entry is a deletion instruction from the settings API, never a stored engine.
+  if (parsed.data.instances) {
+    for (const [id, entry] of Object.entries(parsed.data.instances)) if (entry === null) delete parsed.data.instances[id];
+  }
+  return parsed.data as AppConfig;
 }
 
 export function loadBrowserProfileIdAliases(): ReadonlyMap<string, string> {
@@ -1011,6 +1015,11 @@ export function saveConfig(
     const storedInstances: JsonObject = currentInstances.success ? currentInstances.data : {};
     const diskInstances: JsonObject = options.replaceInstances ? {} : storedInstances;
     for (const [instanceId, entry] of Object.entries(checkedPatch.instances)) {
+      // null removes an engine: the settings page's way to drop one it added.
+      if (entry === null) {
+        delete diskInstances[instanceId];
+        continue;
+      }
       const current = jsonObjectSchema.safeParse(storedInstances[instanceId]);
       const merged: JsonObject = current.success ? { ...current.data } : {};
       // Shadow entries keep fields only a newer app or driver understands.

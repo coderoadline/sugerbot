@@ -267,6 +267,8 @@ export interface ClaudeConfig {
   configDir?: string;
   managed?: boolean;
   managedModels?: string[];
+  managedProvider?: string;
+  managedMeta?: Record<string, { contextWindow?: number }>;
   permissionMode: "acceptEdits" | "auto" | "bypassPermissions";
   tools?: string[];
   disallowedTools?: string[];
@@ -309,13 +311,14 @@ export function readClaudeModelCatalog(env: Record<string, string | undefined> =
     settings = {};
   }
 
-  const { extras, envModel } = claudeModelExtras(settings, env);
+  const { extras } = claudeModelExtras(settings, env);
   const options = STATIC_CLAUDE_MODELS.options.map((option) => ({ ...option }));
   const seen = new Set(options.map((option) => option.id));
   for (const extra of extras) {
     if (seen.has(extra.id)) continue;
     seen.add(extra.id);
-    options.push(extra.custom || extra.id === envModel
+    // A model the CLI is configured to use is a first-class choice, not a hidden custom one.
+    options.push(extra.custom
       ? { id: extra.id, label: extra.label, custom: true }
       : { id: extra.id, label: extra.label });
   }
@@ -639,12 +642,15 @@ function decodeConfig(raw: unknown): ClaudeConfig {
   if (o.configDir !== undefined && typeof o.configDir !== "string") throw new Error("claude: configDir must be a string");
   const configDir = typeof o.configDir === "string" ? o.configDir.trim() : undefined;
   if (configDir) resolveClaudeConfigDir(configDir);
+  if (o.managedMeta !== undefined && (!o.managedMeta || typeof o.managedMeta !== "object" || Array.isArray(o.managedMeta))) throw new Error("Invalid hosted Claude model metadata.");
   if (o.managedModels !== undefined && (o.managed !== true || !Array.isArray(o.managedModels) || !o.managedModels.length || o.managedModels.some(model => typeof model !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(model)))) throw new Error("Invalid hosted Claude models.");
   return {
     cli: typeof o.cli === "string" ? o.cli : "claude",
     ...(configDir ? { configDir } : {}),
     ...(o.managed === true ? { managed: true } : {}),
     ...(o.managedModels ? { managedModels: o.managedModels as string[] } : {}),
+    ...(typeof o.managedProvider === "string" && /^[\w .+-]{1,40}$/.test(o.managedProvider) ? { managedProvider: o.managedProvider } : {}),
+    ...(o.managedMeta ? { managedMeta: o.managedMeta as Record<string, { contextWindow?: number }> } : {}),
     permissionMode: (mode as ClaudeConfig["permissionMode"]) ?? "acceptEdits",
     ...(tools !== undefined ? { tools } : {}),
     ...(disallowedTools !== undefined ? { disallowedTools } : {}),
@@ -785,7 +791,7 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
     if (inheritsUserConfig(catalogEnv)) {
       console.error(`claude (${instanceId}): OMB_CLAUDE_INHERIT_USER_CONFIG=1 — bots inherit this machine's Claude Code MCP servers, skills, hooks and CLAUDE.md on every turn; remove it unless a bot needs a user-scope server`);
     }
-    let models = config.managedModels ? { default: config.managedModels[0], options: config.managedModels.map(id => ({ id, label: id })) } : STATIC_CLAUDE_MODELS;
+    let models = config.managedModels ? { default: config.managedModels[0], options: config.managedModels.map(id => ({ id, label: id, ...(config.managedProvider ? { provider: config.managedProvider } : {}), ...(config.managedMeta?.[id]?.contextWindow ? { contextWindow: config.managedMeta[id]!.contextWindow } : {}) })) } : STATIC_CLAUDE_MODELS;
     const orgBlocks = createOrgModelBlocks(() => engineHomes.everyHome(catalogEnv), (blocked) => { models = withOrgBlocks(models, blocked); });
     const refreshModels = async () => {
       if (config.managed) return;
@@ -1933,7 +1939,15 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       const update = claudeCliUpdate(version, config.cli);
       const warning = claudeInheritWarning(env);
       if (config.requireApiKey && !input.environment.ANTHROPIC_API_KEY) return { state: "unavailable", version, reason: NO_ANTHROPIC_KEY };
-      const probed: typeof lastAuth = config.requireApiKey ? { authenticated: true } : await claudeAuthStatus(config.cli, env);
+      // A loopback ANTHROPIC_BASE_URL in ~/.claude/settings.json is a local gateway (magpie): no account needed.
+      const localGateway = (() => {
+        try {
+          const home = process.env.HOME || "/data/home";
+          const text = readFileSync(join(home, ".claude", "settings.json"), "utf8");
+          return /\"ANTHROPIC_BASE_URL\"\s*:\s*\"http:\/\/(127\.0\.0\.1|localhost|\[::1\])/.test(text);
+        } catch { return false; }
+      })();
+      const probed: typeof lastAuth = config.requireApiKey || localGateway ? { authenticated: true } : await claudeAuthStatus(config.cli, env);
       const auth = probed.authenticated === undefined ? lastAuth : (lastAuth = probed);
       return { state: "available", version, ...auth, ...claudeBilling(env, auth.account), ...(update ? { update } : {}), ...(warning ? { warning } : {}) };
     };

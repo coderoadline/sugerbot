@@ -6,9 +6,22 @@ import type { EffortLevel } from "../../shared/wire";
 import type { ModelVariantOption } from "../../shared/runtime-events";
 import { filterCustomModels, partitionCustomModels, suggestedModels } from "@/lib/custom-models";
 import { configuredModelInstances, isClaudeAccount, isCustomOnly, SIGN_IN_FAMILY_LABEL, signInFamily } from "@/lib/engine-rail";
-import { modelName, simpleModelMenu } from "@/lib/simple-model-menu";
+import { modelName, providerName, simpleModelMenu } from "@/lib/simple-model-menu";
 import { choiceIsSelected, modelChoices, modelSelectionForPick, takesTypedModels, withTypedModels, type ModelChoice } from "@/lib/model-choices";
 export { modelSelectionForPick } from "@/lib/model-choices";
+
+/** The vendor behind a built-in engine, so every model row names its provider even when the catalog does not. */
+const DRIVER_PROVIDER: Record<string, string> = {
+  codex: "OpenAI",
+  chatgpt: "OpenAI",
+  claudeAgent: "Anthropic",
+  antigravityAgent: "Google",
+  deepseekAgent: "DeepSeek",
+  piAgent: "Pi",
+  grok: "xAI",
+  grokAgent: "xAI",
+  kimiAgent: "Moonshot",
+};
 import { pickerPlacement, type PickerPlacement } from "@/lib/picker-placement";
 import type { Typeahead } from "@/lib/menu-keys";
 import { usePopoverDismiss } from "@/hooks/use-popover-dismiss";
@@ -315,14 +328,66 @@ export function ModelPicker({
     ?? claudeAccounts.find((instance) => instance.instanceId === selection.instanceId) ?? claudeAccounts[0];
   const railInstance =
     pickerInstances.find((instance) => instance.instanceId === (railId ?? selection.instanceId)) ?? pickerInstances[0];
-  const displayedInstanceId = railInstance?.instanceId;
+  // One CLI is one engine: its own account plus every gateway added for it. The gateway hosts the merged list so a
+  // signed-out CLI account never hides the models that a gateway can already serve.
+  const CLI_ACCOUNTS = new Set(["codex", "chatgpt", "claude", "claudeApi"]);
+  const familyOf = (instance: InstanceInfo) => {
+    const gateway = instance.instanceId.startsWith("gw-");
+    if (!gateway && !CLI_ACCOUNTS.has(instance.instanceId)) return [instance];
+    return instances.filter((candidate) => candidate.driverKind === instance.driverKind
+      && (candidate.instanceId.startsWith("gw-") || CLI_ACCOUNTS.has(candidate.instanceId)));
+  };
+  const family = railInstance ? familyOf(railInstance) : [];
+  const familyHost = family.find((member) => member.instanceId.startsWith("gw-")) ?? family[0] ?? railInstance;
+  const familyLabel = familyHost?.driverKind === "codex" ? "Codex"
+    : familyHost?.driverKind === "claudeAgent" ? "Claude"
+    : undefined;
+  // A gateway names itself after the account it was added for ("gw-codex-workbuddy" → "workbuddy"); a signed-in CLI
+  // account names its vendor. A CLI account that is not signed in offers nothing, so it stays out of the list.
+  const providerLabel = (member: InstanceInfo) => {
+    const gateway = /^gw-[a-z]+-(.+)$/.exec(member.instanceId);
+    return gateway ? gateway[1] : providerName(member);
+  };
+  const familyModels = family.filter((member) => member.instanceId.startsWith("gw-") || member.snapshot.authenticated === true);
+  const mergedRail = familyHost && familyModels.length > 1
+    ? {
+        ...familyHost,
+        displayName: familyLabel ?? familyHost.displayName,
+        models: {
+          ...familyHost.models,
+          options: familyModels.flatMap((member) => member.models.options.map((option) => ({
+            ...option,
+            provider: option.provider ?? providerLabel(member),
+            gatewayInstanceId: member.instanceId,
+          }))),
+        },
+      }
+    : familyHost;
+  // The rail shows one entry per CLI whichever engine the bot currently uses, so the collapse cannot depend on the
+  // selected instance alone.
+  const railList = pickerInstances.filter((instance) => {
+    const isGateway = instance.instanceId.startsWith("gw-");
+    if (!isGateway && !CLI_ACCOUNTS.has(instance.instanceId)) return true;
+    const siblings = pickerInstances.filter((candidate) => candidate.driverKind === instance.driverKind
+      && (candidate.instanceId.startsWith("gw-") || CLI_ACCOUNTS.has(candidate.instanceId)));
+    if (siblings.length < 2) return true;
+    const host = siblings.find((candidate) => candidate.instanceId.startsWith("gw-")) ?? siblings[0];
+    return instance.instanceId === host.instanceId;
+  });
+  const ownerOf = (option: ModelChoice) => {
+    const gatewayInstanceId = (option as ModelChoice & { gatewayInstanceId?: string }).gatewayInstanceId;
+    return gatewayInstanceId
+      ? instances.find((instance) => instance.instanceId === gatewayInstanceId) ?? familyHost
+      : familyHost;
+  };
+  const displayedInstanceId = mergedRail?.instanceId;
   // A plan account discovers its allowed models only after sign-in: an empty catalog must still lead to cloud sign-in,
   // never local models.
-  const hasOfficialModels = Boolean(railInstance?.snapshot.chatgptPlan || railInstance?.models.options.some((option) => !option.custom));
-  const customOnly = isCustomOnly(railInstance);
+  const hasOfficialModels = Boolean(mergedRail?.snapshot.chatgptPlan || mergedRail?.models.options.some((option) => !option.custom));
+  const customOnly = isCustomOnly(mergedRail);
   const { pane, setPane, loading: loadingList } = usePickerPane({ instanceId: displayedInstanceId, railId, hasOfficialModels, customOnly,
     reading: open && (loadingInstances || refreshingId !== null),
-    selectedIsCustom: Boolean(railInstance?.models.options.some((option) => option.id === selection.model && option.custom)) }, () => resetList());
+    selectedIsCustom: Boolean(mergedRail?.models.options.some((option) => option.id === selection.model && option.custom)) }, () => resetList());
 
   const refreshLocalInstances = useCallback(() => {
     if (refreshingRef.current) return;
@@ -503,25 +568,24 @@ export function ModelPicker({
     close(true);
   } : undefined;
 
-  const official = railInstance ? modelChoices(railInstance, railInstance.models.options.filter((option) => !option.custom)) : [];
-  const custom = railInstance?.models.options.filter((option) => option.custom) ?? [];
-  const currentModel = selection.instanceId === railInstance?.instanceId
-    ? official.find((option) => choiceIsSelected(option, selection))?.id : undefined;
+  const official = mergedRail ? modelChoices(mergedRail, mergedRail.models.options.filter((option) => !option.custom)) : [];
+  const custom = mergedRail?.models.options.filter((option) => option.custom) ?? [];
+  const currentModel = official.find((option) => choiceIsSelected(option, selection))?.id;
   const filteredOfficial = filterCustomModels(official, query);
-  const compactOfficial = railInstance
-    ? suggestedModels(official, railInstance.models.default, currentModel, COMPACT_MODEL_COUNT)
+  const compactOfficial = mergedRail
+    ? suggestedModels(official, mergedRail.models.default, currentModel, COMPACT_MODEL_COUNT)
     : [];
   const shownOfficial = query ? filteredOfficial : showAll ? official : compactOfficial;
   const filteredCustom = filterCustomModels(custom, query);
   const { pinned, rest } = partitionCustomModels(filteredCustom);
-  const blocked = railInstance
+  const blocked = mergedRail
     ? pane === "custom"
-      ? needsCli(railInstance)
-      : needsCli(railInstance) || needsSignIn(railInstance)
+      ? needsCli(mergedRail)
+      : needsCli(mergedRail) || needsSignIn(mergedRail)
     : false;
-  const canOpenCustom = Boolean(railInstance && !needsCli(railInstance));
-  const canReturnToOfficial = official.length > 0 && !isCustomOnly(railInstance);
-  const lookingForLocal = Boolean(railInstance && probing.has(railInstance.instanceId));
+  const canOpenCustom = Boolean(mergedRail && !needsCli(mergedRail));
+  const canReturnToOfficial = official.length > 0 && !isCustomOnly(mergedRail);
+  const lookingForLocal = Boolean(mergedRail && probing.has(mergedRail.instanceId));
   const lookingForLocalStatus = (
     <div role="status" className={cn(MENU_LINE, "justify-center text-ink-tertiary")}>
       <Loader2 size={14} className="shrink-0 animate-spin" aria-hidden="true" />
@@ -552,10 +616,11 @@ export function ModelPicker({
     <ModelRow
       key={option.id}
       option={option}
-      current={selection.instanceId === railInstance?.instanceId && choiceIsSelected(option, selection)}
-      defaultId={railInstance?.models.default ?? ""}
+      provider={option.provider ?? (railInstance ? DRIVER_PROVIDER[railInstance.driverKind] ?? providerName(railInstance) : undefined)}
+      current={selection.instanceId === (ownerOf(option)?.instanceId ?? "") && choiceIsSelected(option, selection)}
+      defaultId={mergedRail?.models.default ?? ""}
       botModel={botModelSelection ? choiceIsSelected(option, botModelSelection) : false}
-      onPick={() => railInstance && pick(railInstance, option.nativeModel ?? option.id, option.variant)}
+      onPick={() => { const owner = ownerOf(option); if (owner) pick(owner, option.nativeModel ?? option.id, option.variant); }}
     />
   );
 
@@ -701,7 +766,7 @@ export function ModelPicker({
         <FollowBotModelRow name={profile.name} model={botModelName} follows={follows} onPick={pickBotModel} />
       )}
       <div className="flex min-h-0 min-w-0 flex-1">
-        {pickerInstances.length > 0 && <ModelEngineRail instances={pickerInstances} selectedInstance={railInstance} claudeInstance={claudeRailInstance} openaiInstance={openaiRailInstance} onSelect={selectRail}
+        {pickerInstances.length > 0 && <ModelEngineRail instances={railList} selectedInstance={mergedRail} claudeInstance={claudeRailInstance} openaiInstance={openaiRailInstance} onSelect={selectRail}
           onAddApiKeys={remote ? undefined : openApiKeys} />}
 
         <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">

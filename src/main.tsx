@@ -16,6 +16,12 @@ import { PageBoundary } from "./components/PageBoundary";
 import { endedBeforeReload, forgetEndedSession, SESSION_ENDED_REASON } from "./lib/session-ended";
 import "./styles.css";
 
+// The host in front of this server answers every response with "cache-control: no-store", so the browser's
+// HTTP cache never keeps a transcript image. The worker keeps its own copies instead; see public/sw.js.
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  void navigator.serviceWorker.register("/sw.js", { updateViaCache: "none" }).catch(() => undefined);
+}
+
 // Before first paint; settleAdvancedModeDefault must run before applySkin writes omb-skin.
 settleAdvancedModeDefault();
 applySkinChoice(readSkinChoice());

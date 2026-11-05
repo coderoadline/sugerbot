@@ -169,7 +169,11 @@ function headerValue(value: string | string[] | undefined): string | undefined {
 }
 
 export function requestOrigin(req: IncomingMessage): string | null {
-  const host = headerValue(req.headers.host)?.trim();
+  // A tunnel in front of the server rewrites Host to the address it forwards to (a sandbox publishes
+  // "Host: 127.0.0.1"), and tells the truth in X-Forwarded-Host. The page's Origin is the public name, so the
+  // same-origin check has to read the forwarded one or every cookie request looks cross-origin.
+  const forwardedHost = headerValue(req.headers["x-forwarded-host"])?.split(",")[0]?.trim().toLowerCase();
+  const host = forwardedHost || headerValue(req.headers.host)?.trim();
   if (!host) return null;
   const forwarded = headerValue(req.headers["x-forwarded-proto"])?.split(",")[0]?.trim().toLowerCase();
   const proto = forwarded === "https" || forwarded === "http" ? forwarded : "http";

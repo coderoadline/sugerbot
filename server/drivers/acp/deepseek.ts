@@ -109,6 +109,27 @@ function dotenvValuePresent(path: string): boolean {
   return false;
 }
 
+/** Every dotenv assignment in $DSH_HOME/.env, so the catalog probe sees the credentials dsh would. */
+function dotenvValues(path: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return out;
+  }
+  for (const line of text.split(/\r?\n/)) {
+    const match = DOTENV_LINE.exec(line);
+    if (!match) continue;
+    const at = line.indexOf("=");
+    if (at <= 0) continue;
+    const name = line.slice(0, at).trim();
+    const value = match[1]!.trim().replace(/^['"]|['"]$/g, "");
+    if (name && value) out[name] = value;
+  }
+  return out;
+}
+
 /** A DeepSeek key dsh will find: the launch env, its stored credential file,
  * or its home .env (the layers dsh documents, read-only here). The stored
  * file outranks the env inside dsh; for "is there a key at all" any layer counts. */
@@ -192,8 +213,9 @@ export function fetchDeepSeekCatalog(
   return new Promise((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     try {
-      const resolved = resolveCli(cli, ["--profile", "acp"], env);
-      child = spawn(resolved.command, resolved.args, { stdio: ["pipe", "pipe", "ignore"], env: env as NodeJS.ProcessEnv, windowsHide: true });
+      const launchEnv = { ...dotenvValues(join(dshHome(env), ".env")), ...env } as Record<string, string | undefined>;
+      const resolved = resolveCli(cli, ["--profile", "acp"], launchEnv);
+      child = spawn(resolved.command, resolved.args, { stdio: ["pipe", "pipe", "ignore"], env: launchEnv as NodeJS.ProcessEnv, windowsHide: true });
     } catch (error) {
       return reject(error instanceof Error ? error : new Error(String(error)));
     }

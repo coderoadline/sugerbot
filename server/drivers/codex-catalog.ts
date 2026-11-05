@@ -48,8 +48,10 @@ export function decodeCodexSelection(id: string | null | undefined): {
   if (sep > 0) {
     return { model: id.slice(sep + SEP.length), modelProvider: id.slice(0, sep) };
   }
-  // A bare id is official: a new cloud model must not fall through to the user's local provider.
-  return { model: id, modelProvider: MODEL_ID.test(id) ? OFFICIAL_CODEX_PROVIDER : null };
+  // Only OpenAI's own slugs are official: a gateway model like "workbuddy-local/x" must fall through to the CLI's
+  // configured provider (magpie), or Codex refuses to start a turn in a chat it recorded under another provider.
+  const officialSlug = /^(gpt-|o[1-9]|codex)/i.test(id);
+  return { model: id, modelProvider: officialSlug ? OFFICIAL_CODEX_PROVIDER : null };
 }
 
 interface CodexAppServerModel {

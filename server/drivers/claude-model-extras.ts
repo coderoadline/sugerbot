@@ -29,9 +29,17 @@ export function claudeModelExtras(settings: Record<string, unknown>, env: Record
     ...extrasFromUnknown(settings.customModels).map((extra) => ({ ...extra, custom: true })),
     ...extrasFromUnknown(settings.extraModels).map((extra) => ({ ...extra, custom: !official(extra.id) })),
   ];
+  // magpie writes its choices into settings.modelPicker.options and settings.model; both are first-class models.
+  const picker = settings.modelPicker && typeof settings.modelPicker === "object"
+    ? (settings.modelPicker as { options?: unknown }).options : undefined;
+  extras.push(...extrasFromUnknown(picker).map((extra) => ({ ...extra, custom: false })));
+  if (typeof settings.model === "string") {
+    extras.push(...extrasFromUnknown([settings.model]).map((extra) => ({ ...extra, custom: false })));
+  }
   const nestedEnv = settings.env && typeof settings.env === "object" ? (settings.env as Record<string, unknown>) : {};
   const envModel = nestedEnv.ANTHROPIC_MODEL ?? env.ANTHROPIC_MODEL;
-  if (typeof envModel === "string") extras.push(...extrasFromUnknown([envModel]).map((extra) => ({ ...extra, custom: true })));
+  // The model the CLI is configured to run is a first-class choice, not a hidden custom entry.
+  if (typeof envModel === "string") extras.push(...extrasFromUnknown([envModel]).map((extra) => ({ ...extra, custom: false })));
   // Claude Code's own /model additions; official ids are already in the static list.
   const fromEnv = (name: string) => {
     const value = nestedEnv[name] ?? env[name];

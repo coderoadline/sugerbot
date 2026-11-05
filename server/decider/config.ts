@@ -25,6 +25,8 @@ const optionalText = z.string().optional();
 export const deciderConfigSchema = z.object({
   enabled: z.boolean().optional(),
   provider: z.enum(["jev", "openrouter", "off"]).optional(),
+  /** A Jev-compatible server's model id; unset uses the built-in vendor id. */
+  jevModel: z.string().trim().max(128).optional(),
   key: optionalText,
   openrouterKey: optionalText,
   workersAiToken: optionalText,
@@ -61,6 +63,7 @@ export const deciderConfigSchema = z.object({
 export interface DeciderConfig {
   enabled?: boolean;
   provider?: "jev" | "openrouter" | "off";
+  jevModel?: string;
   key?: string;
   baseUrl?: string;
   openrouterKey?: string;

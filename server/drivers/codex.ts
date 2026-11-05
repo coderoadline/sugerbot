@@ -70,7 +70,7 @@ export interface CodexConfig {
   cli: string;
   fullAuto: boolean;
   authMode?: "chatgpt-plan";
-  managed?: { url: string; models: string[] };
+  managed?: { url: string; models: string[]; meta?: Record<string, { contextWindow?: number }>; provider?: string };
 }
 
 function decodeConfig(raw: unknown): CodexConfig {
@@ -104,7 +104,7 @@ export function chatgptPlanCodexArgs(): string[] {
 }
 
 function decodeManagedCodex(raw: object): NonNullable<CodexConfig["managed"]> {
-  const value = raw as { url?: unknown; models?: unknown };
+  const value = raw as { url?: unknown; models?: unknown; meta?: unknown; provider?: unknown };
   if (typeof value.url !== "string" || !Array.isArray(value.models) || !value.models.length || value.models.some(model => typeof model !== "string" || !/^[\w][\w./+-]*$/.test(model))) {
     throw new Error("Invalid Company Codex configuration.");
   }
@@ -112,7 +112,22 @@ function decodeManagedCodex(raw: object): NonNullable<CodexConfig["managed"]> {
   // Plain HTTP leaks the Company API key; allow it only on loopback.
   const loopback = url.hostname === "localhost" || url.hostname === "[::1]" || /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
   if (url.username || url.password || url.search || url.hash || (url.protocol !== "https:" && !(url.protocol === "http:" && loopback))) throw new Error("Invalid Company Codex endpoint.");
-  return { url: url.href.replace(/\/$/, ""), models: value.models as string[] };
+  // Per-model display metadata a gateway cannot describe: today only the context window.
+  let meta: Record<string, { contextWindow?: number }> | undefined;
+  if (value.meta !== undefined) {
+    if (!value.meta || typeof value.meta !== "object" || Array.isArray(value.meta)) throw new Error("Invalid Company model metadata.");
+    meta = {};
+    for (const [id, entry] of Object.entries(value.meta as Record<string, unknown>)) {
+      const window = entry && typeof entry === "object" && !Array.isArray(entry)
+        ? (entry as { contextWindow?: unknown }).contextWindow : undefined;
+      if (window !== undefined && (typeof window !== "number" || !Number.isSafeInteger(window) || window <= 0)) {
+        throw new Error("Invalid Company model context window.");
+      }
+      meta[id] = window === undefined ? {} : { contextWindow: window };
+    }
+  }
+  const provider = typeof value.provider === "string" && /^[\w .+-]{1,40}$/.test(value.provider) ? value.provider : undefined;
+  return { url: url.href.replace(/\/$/, ""), models: value.models as string[], ...(meta && Object.keys(meta).length ? { meta } : {}), ...(provider ? { provider } : {}) };
 }
 
 export function managedCodexArgs(config: NonNullable<CodexConfig["managed"]>): string[] {
@@ -490,6 +505,8 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       stripWorkspaceCredentialEnv(env);
       delete env.OPENMAUSBOT_CHATGPT_TOKEN;
       if (plan) env.CODEX_HOME = join(planDirectory, "codex");
+      // A managed engine reads ~/.codex unless the instance names its own home.
+      if (config.managed && !env.CODEX_HOME) env.CODEX_HOME = join(homedir(), ".codex");
       return env;
     };
     const catalogEnv = childEnv();
@@ -498,7 +515,7 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     let planSigningOut = false;
     let disposed = false;
     let planWarning: string | undefined;
-    let models = plan ? { default: "", options: [] } : config.managed ? { default: config.managed.models[0], options: config.managed.models.map(id => ({ id, label: id })) } : STATIC_CODEX_MODELS;
+    let models = plan ? { default: "", options: [] } : config.managed ? { default: config.managed.models[0], options: config.managed.models.map(id => ({ id, label: id, ...(config.managed?.provider ? { provider: config.managed.provider } : {}), ...(config.managed?.meta?.[id]?.contextWindow ? { contextWindow: config.managed.meta[id]!.contextWindow } : {}) })) } : STATIC_CODEX_MODELS;
     const refreshModels = async (preserveExisting = false) => {
       if (config.managed) return;
       if (planAuth) {
@@ -638,7 +655,15 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       const chatgptTurn = ownLogin &&
         decodeCodexSelection(turn.model || models.default).modelProvider === OFFICIAL_CODEX_PROVIDER;
       const route: CodexRoute = plan ? "plan" : chatgptTurn ? "own" : "other";
-      const signedOut = chatgptTurn && await loginCheck(childEnv()) === "missing";
+      // A local gateway (magpie) authenticates the CLI itself, so its loopback config makes a Codex sign-in moot.
+      const localGatewayConfig = await (async () => {
+        try {
+          const home = codexHome(childEnv());
+          const text = home ? (await import("node:fs")).readFileSync((await import("node:path")).join(home, "config.toml"), "utf8") : "";
+          return /base_url\s*=\s*"http:\/\/(127\.0\.0\.1|localhost|\[::1\])/.test(text);
+        } catch { return false; }
+      })();
+      const signedOut = chatgptTurn && !localGatewayConfig && await loginCheck(childEnv()) === "missing";
       assertPlanCurrent();
       if (active.has(threadId)) throw new Error("a turn is already running on this thread");
       const turnId = newId();
@@ -1655,11 +1680,21 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     const { version } = probe;
     if (planAuth) return { state: "available", version, chatgptPlan: true, billing: "subscription", ...await planAuth.snapshot(), update: await codexReleaseUpdate(version, config.cli),
       ...(planWarning ? { warning: { title: "Check ChatGPT connection", message: planWarning } } : {}) };
-    if (config.managed) return { state: "available", version, authenticated: Boolean(input.environment.OPENMAUSBOT_COMPANY_API_KEY && input.environment.CODEX_HOME), billing: "metered" };
+    // A managed gateway authenticates with its own key; CODEX_HOME is ours to place, so it is not a sign-in precondition.
+    if (config.managed) return { state: "available", version, authenticated: Boolean(input.environment.OPENMAUSBOT_COMPANY_API_KEY), billing: "metered" };
     const previousCliVersion = modelsCliVersion;
     modelsCliVersion = version;
     if (previousCliVersion !== null && previousCliVersion !== version) await refreshModels();
-    const authenticated = await codexLoginStatus(config.cli, env) === "signed-in";
+    // Magpie (or any local gateway) writes a loopback model_provider into ~/.codex/config.toml; that gateway
+    // authenticates the CLI itself, so a signed-out account does not block it.
+    const localGateway = await (async () => {
+      try {
+        const home = codexHome(env);
+        const text = home ? (await import("node:fs")).readFileSync((await import("node:path")).join(home, "config.toml"), "utf8") : "";
+        return /base_url\s*=\s*"http:\/\/(127\.0\.0\.1|localhost|\[::1\])/.test(text);
+      } catch { return false; }
+    })();
+    const authenticated = (await codexLoginStatus(config.cli, env) === "signed-in") || localGateway;
     if (authenticated && loginRejected()) {
       return { state: "available", version, authenticated: false, reason: CODEX_SIGN_IN_EXPIRED,
         update: await codexReleaseUpdate(version, config.cli), billing: "subscription" };

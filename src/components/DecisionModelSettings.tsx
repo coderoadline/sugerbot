@@ -104,6 +104,8 @@ export function DecisionModelSettings() {
   const sharedKey = openrouter && decider?.sharedKey === true;
   const ownKey = configured && !included && !usingShared;
   const enabled = decider?.enabled ?? false;
+  /** A Jev-compatible server the operator points at (Base URL + model), shown for the Jev provider. */
+  const jev = (decider ?? {}) as { baseUrl?: string; jevModel?: string };
   const roomRouting = decider?.jobs.roomRouting ?? true;
   const [value, setValue] = useState("");
   const [saving, setSaving] = useState(false);
@@ -289,6 +291,37 @@ export function DecisionModelSettings() {
               </>
             )}
           </p>
+        )}
+        {!openrouter && (
+          <div className="mb-3 grid gap-2 sm:grid-cols-2" data-testid="decider-jev-endpoint">
+            <label className="block text-[12px] text-ink-secondary">
+              Base URL
+              <input
+                type="url"
+                defaultValue={jev.baseUrl ?? ""}
+                placeholder="https://api.codiv.ai"
+                disabled={switching}
+                onBlur={(event) => {
+                  const next = event.target.value.trim();
+                  if (next !== (jev.baseUrl ?? "")) void patch({ baseUrl: next });
+                }}
+                className="mt-1 w-full rounded-lg border border-hairline/40 bg-control/30 px-2 py-1.5 text-[13px] text-ink"
+              />
+            </label>
+            <label className="block text-[12px] text-ink-secondary">
+              Model
+              <input
+                defaultValue={jev.jevModel ?? ""}
+                placeholder="openjev-latest"
+                disabled={switching}
+                onBlur={(event) => {
+                  const next = event.target.value.trim();
+                  if (next !== (jev.jevModel ?? "")) void patch({ jevModel: next });
+                }}
+                className="mt-1 w-full rounded-lg border border-hairline/40 bg-control/30 px-2 py-1.5 text-[13px] text-ink"
+              />
+            </label>
+          </div>
         )}
         <div className="flex gap-2">
           <input

@@ -32,6 +32,9 @@ import {
 } from "@/lib/composer-attachments";
 import { cn } from "@/lib/cn";
 import { t } from "@/lib/i18n";
+import { useCachedMedia } from "@/lib/media-cache";
+
+const BLANK_PIXEL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 import { FilePreviewButton } from "./FilePreviewButton";
 import { ImageLoading } from "./ImageLoading";
 
@@ -665,6 +668,7 @@ export function AttachmentThumbnail({
   eager?: boolean;
   explainRefusal?: boolean;
 }) {
+  const cachedSrc = useCachedMedia(image.src);
   // Callers key this by src: resetting in an effect races a cached image's onLoad, which can fire before the effect
   // runs.
   const [state, setState] = useState<"loading" | "ready" | "failed">("loading");
@@ -730,7 +734,7 @@ export function AttachmentThumbnail({
         >
           <img
             key={`${image.src}:${attempt}`}
-            src={image.src}
+            src={cachedSrc ?? BLANK_PIXEL}
             alt={image.name}
             loading={eager ? "eager" : "lazy"}
             fetchPriority={eager ? "high" : undefined}

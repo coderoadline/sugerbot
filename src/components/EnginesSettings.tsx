@@ -503,11 +503,187 @@ export function HiddenEngines() {
   );
 }
 
+export function AddGatewayEngine() {
+  const { state, refreshInstances } = useStore();
+  const added = state.instances.filter((instance) => instance.instanceId.startsWith("gw-"));
+  const remove = async (instanceId: string) => {
+    try {
+      await api("/api/config", { method: "PUT", body: JSON.stringify({ instances: { [instanceId]: null } }) });
+      await refreshInstances({ reportErrors: false }).catch(() => undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+  const [kind, setKind] = useState<"codex" | "claude" | "deepseek">("codex");
+  const [name, setName] = useState("");
+  const [url, setUrl] = useState("http://127.0.0.1:8788/v1");
+  const [key, setKey] = useState("");
+  const [models, setModels] = useState("");
+  const [apiKind, setApiKind] = useState("openai-completions");
+  const [apiKeyEnv, setApiKeyEnv] = useState("OMB_GW_KEY");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pulling, setPulling] = useState(false);
+  const [pulled, setPulled] = useState<Array<{ id: string; contextWindow?: number }>>([]);
+  const [picked, setPicked] = useState<string[]>([]);
+  const slug = name.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+  const pull = async () => {
+    setPulling(true); setError(null); setNote(null);
+    try {
+      const result = await api<{ models: Array<{ id: string; contextWindow?: number }> }>(
+        "/api/gateway-models?url=" + encodeURIComponent(url.trim()) + "&key=" + encodeURIComponent(key.trim()),
+      );
+      setPulled(result.models);
+      setPicked(result.models.map((model) => model.id));
+      setNote("拉到 " + result.models.length + " 个模型，勾选后保存");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPulling(false);
+    }
+  };
+  const add = async () => {
+    const typed = models.split(",").map((m) => m.trim()).filter(Boolean);
+    const list = picked.length ? picked : typed;
+    if (!slug || !url.trim() || !key.trim() || list.length === 0) { setError("名称 / 地址 / key / 模型 都要填"); return; }
+    setBusy(true); setError(null); setNote(null);
+    try {
+      const target = url.trim().replace(/\/+$/, "");
+      const meta = Object.fromEntries(list.map((model) => [model, { contextWindow: 1_000_000 }]));
+      if (kind === "deepseek") {
+        await api("/api/dsh-provider", {
+          method: "POST",
+          body: JSON.stringify({
+            provider: slug,
+            displayName: name.trim() || slug,
+            baseUrl: target,
+            api: apiKind,
+            apiKeyEnv: apiKeyEnv.trim(),
+            key: key.trim(),
+            models: list.map((id) => ({ id, contextWindow: 1_000_000 })),
+          }),
+        });
+        await api("/api/instances/deepseek/refresh-models", { method: "POST", body: "{}" }).catch(() => undefined);
+        await refreshInstances({ reportErrors: false }).catch(() => undefined);
+        setNote("已写入 DeepSeek 的 provider " + slug + "；模型菜单里是 " + slug + "/<模型>");
+      } else {
+        const id = "gw-" + kind + "-" + slug;
+        const target2 = kind === "claude" ? target.replace(/\/v1$/, "") : target;
+        const instance = kind === "codex" ? {
+          driver: "codex",
+          displayName: "Codex · " + slug,
+          config: { managed: { url: target, models: list, meta } },
+          environment: { OPENMAUSBOT_COMPANY_API_KEY: key.trim() },
+        } : {
+          driver: "claudeAgent",
+          displayName: "Claude · " + slug,
+          access: "api" as const,
+          config: { managed: true, managedModels: list, managedMeta: meta, configDir: "~/.openmausbot/gateway-homes/" + id, requireApiKey: true },
+          environment: { ANTHROPIC_API_KEY: key.trim(), ANTHROPIC_BASE_URL: target2 },
+        };
+        await api("/api/config", { method: "PUT", body: JSON.stringify({ instances: { [id]: instance } }) });
+        await refreshInstances({ reportErrors: false }).catch(() => undefined);
+        setNote("已添加 " + id);
+      }
+      setKey(""); setModels(""); setName("");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const field = "mt-1 w-full rounded-lg border border-hairline/40 bg-control/30 px-2 py-1.5 text-[13px] text-ink";
+  return (
+    <div className="mx-4 rounded-xl border border-hairline/40 bg-card p-4" data-testid="engine-add-gateway">
+      <h2 className="text-[15px] font-medium text-ink">添加第三方模型</h2>
+      <p className="mt-1 text-[12px] leading-relaxed text-ink-secondary">
+        Codex / Claude：成为一条独立引擎，模型名就是下拉里显示的名字。DeepSeek Harness：写进它自己的 provider 表，模型显示为 provider/模型。
+      </p>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <label className="text-[12px] text-ink-secondary">挂到哪个 CLI
+          <select value={kind} onChange={(event) => setKind(event.target.value === "claude" ? "claude" : event.target.value === "deepseek" ? "deepseek" : "codex")} className={field}>
+            <option value="codex">Codex</option>
+            <option value="claude">Claude</option>
+            <option value="deepseek">DeepSeek Harness</option>
+          </select>
+        </label>
+        <label className="text-[12px] text-ink-secondary">{kind === "deepseek" ? "Provider id" : "短名"}
+          <input value={name} onChange={(event) => setName(event.target.value)} placeholder={kind === "deepseek" ? "omb-gw" : "workbuddy"} className={field} />
+        </label>
+        <label className="text-[12px] text-ink-secondary sm:col-span-2">网关地址
+          <input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="http://127.0.0.1:8788/v1" className={field} />
+        </label>
+        {kind === "deepseek" && (
+          <>
+            <label className="text-[12px] text-ink-secondary">协议
+              <select value={apiKind} onChange={(event) => setApiKind(event.target.value)} className={field}>
+                <option value="openai-completions">openai-completions</option>
+                <option value="openai-responses">openai-responses</option>
+                <option value="anthropic-messages">anthropic-messages</option>
+              </select>
+            </label>
+            <label className="text-[12px] text-ink-secondary">key 环境变量名
+              <input value={apiKeyEnv} onChange={(event) => setApiKeyEnv(event.target.value)} className={field} />
+            </label>
+          </>
+        )}
+        <label className="text-[12px] text-ink-secondary sm:col-span-2">API key
+          <input type="password" value={key} onChange={(event) => setKey(event.target.value)} className={field} />
+        </label>
+        <label className="text-[12px] text-ink-secondary sm:col-span-2">模型 id（逗号分隔；留空则从 /models 拉取）
+          <input value={models} onChange={(event) => setModels(event.target.value)} placeholder="deepseek-v4.1-flash-sg,hy3" className={field} />
+        </label>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <button type="button" disabled={pulling || !url.trim() || !key.trim()} onClick={() => void pull()} className="rounded-lg border border-hairline/40 px-2.5 py-1 text-[12px] text-ink-secondary disabled:opacity-50">
+          {pulling ? "拉取中…" : "拉取模型列表"}
+        </button>
+        {pulled.length > 0 && (
+          <button type="button" onClick={() => setPicked(picked.length ? [] : pulled.map((model) => model.id))} className="rounded-lg border border-hairline/40 px-2.5 py-1 text-[12px] text-ink-secondary">
+            {picked.length ? "全不选" : "全选"}
+          </button>
+        )}
+        <span className="text-[11px] text-ink-secondary">导入的模型默认按 1M 上下文记录</span>
+      </div>
+      {pulled.length > 0 && (
+        <div className="mt-2 max-h-56 overflow-auto rounded-lg border border-hairline/40">
+          {pulled.map((model) => (
+            <label key={model.id} className="flex items-center gap-2 border-b border-hairline/20 px-2 py-1 text-[12px] text-ink last:border-0">
+              <input type="checkbox" checked={picked.includes(model.id)} onChange={() => setPicked((current) => current.includes(model.id) ? current.filter((id) => id !== model.id) : [...current, model.id])} />
+              <span className="min-w-0 flex-1 truncate">{model.id}</span>
+              <span className="shrink-0 text-[11px] text-ink-secondary">{model.contextWindow ? Math.round(model.contextWindow / 1000) + "k" : "1M"}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      <button type="button" disabled={busy} onClick={() => void add()} className="mt-3 rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-white disabled:opacity-50">
+        {busy ? "保存中…" : kind === "deepseek" ? "写入 provider" : "添加引擎"}
+      </button>
+      {note && <p role="status" className="mt-2 text-[12px] text-success">{note}</p>}
+      {error && <p role="alert" className="mt-2 text-[12px] text-danger">{error}</p>}
+      {added.length > 0 && (
+        <div className="mt-4 border-t border-hairline/40 pt-3">
+          <p className="text-[12px] text-ink-secondary">已添加的网关</p>
+          <ul className="mt-1 space-y-1">
+            {added.map((instance) => (
+              <li key={instance.instanceId} className="flex items-center justify-between gap-2 text-[13px] text-ink">
+                <span className="min-w-0 truncate">{instance.displayName ?? instance.instanceId}<span className="ml-2 text-[11px] text-ink-secondary">{instance.instanceId}</span></span>
+                <button type="button" onClick={() => void remove(instance.instanceId)} className="shrink-0 rounded-md border border-hairline/40 px-2 py-0.5 text-[12px] text-ink-secondary hover:text-danger">删除</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function EnginesSettings({ simple = false, more }: { simple?: boolean; more?: { id: string; open: boolean; onToggle: () => void } }) {
   const { state } = useStore();
   // Leaving Settings ends the "now uses the copy OpenMausBot installed" lines.
   useEffect(() => forgetAppCopySwitches, []);
-  const listed = state.instances.filter((i) => i.readOnly || i.cli !== undefined || i.cliDefault !== undefined || i.snapshot.state === "unavailable" || isApiKeyEngine(i));
+  const listed = state.instances.filter((i) => i.readOnly || i.cli !== undefined || i.cliDefault !== undefined || i.snapshot.state === "unavailable" || i.snapshot.state === "available" || isApiKeyEngine(i));
   // A provider's accounts share one card, which takes the place of its first account.
   const groups = new Map<AccountGroup, InstanceInfo[]>();
   for (const instance of listed) {

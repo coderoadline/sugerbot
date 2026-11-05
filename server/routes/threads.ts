@@ -151,7 +151,9 @@ export function createThreadRoutes(deps: ThreadRouteDeps): RouteHandler {
       res.writeHead(200, {
         "content-type": message.mime ?? "image/png",
         "content-length": String(bytes.byteLength),
-        "cache-control": "private, no-store",
+        // A message's own image never changes, so the browser may keep its copy instead of
+        // re-downloading it every time the conversation is opened on a slow link.
+        "cache-control": "private, max-age=604800, immutable",
       });
       return res.end(bytes);
     }
@@ -260,10 +262,13 @@ export function createThreadRoutes(deps: ThreadRouteDeps): RouteHandler {
         ...(streamsMessageImage
           ? { "content-disposition": "inline" }
           : { "content-disposition": messageFileDisposition(messageFileDownloadName(downloadName, file.name)) }),
-        "cache-control": "private, no-store",
-        "cdn-cache-control": "no-store",
-        "cloudflare-cdn-cache-control": "no-store",
-        pragma: "no-cache",
+        // A message's preview image is fixed for that message and offset, so the browser may keep its own copy:
+        // "private" keeps it out of shared proxies, and the long lifetime stops a remote client from re-fetching
+        // every picture each time the conversation is opened.
+        "cache-control": streamsMessageImage ? "private, max-age=604800, immutable" : "private, no-store",
+        ...(streamsMessageImage
+          ? {}
+          : { "cdn-cache-control": "no-store", "cloudflare-cdn-cache-control": "no-store", pragma: "no-cache" }),
         vary: "Authorization",
         "x-content-type-options": "nosniff",
         ...(streamsMessageImage
@@ -405,10 +410,12 @@ export function createThreadRoutes(deps: ThreadRouteDeps): RouteHandler {
       const attachment = readAttachment(m[1]!);
       if (!attachment) return json(res, 404, { error: "no such attachment" });
       const size = attachment.bytes.byteLength;
-      // Visibility is decided per request, so the browser must never reuse one member's copy for another identity.
+      // An attachment name is a generated UUID whose bytes never change, so the browser may keep its own copy:
+      // "private" keeps it out of shared proxies, and the long lifetime stops a remote browser from re-fetching
+      // every picture over a slow link on each render.
       const headers = {
         "content-type": attachment.mime,
-        "cache-control": "private, no-store",
+        "cache-control": "private, max-age=604800, immutable",
         "x-content-type-options": "nosniff",
       };
       if (attachment.mime.startsWith("audio/")) {

@@ -2807,7 +2807,7 @@
   "model.providerSwitch.threadBody": "将此对话切换为 {model}，并将其权限重置为「询问」。现有的工具批准会清除。机器人的默认值与其他对话不会变更。之后你可以检查新提供方的访问权。",
   "model.providerSwitch.botBody": "将机器人的模型切换为 {model}，并把此对话与该机器人的权限设为询问，同时清除现有的工具批准。所有使用机器人模型的对话也会一并切换，在新提供方需要时改回询问。使用自己模型的对话保持不变。之后你可以检查新提供方的访问权限。",
   "model.providerSwitch.confirm": "以「询问」权限切换",
-  "model.useBotModel": "使用 {name} 的模型",
+  "model.useBotModel": "使用机器人 {name} 的默认模型",
   "model.botModelTag": "（机器人的模型）",
   "model.followsBot": "使用 {name} 的模型",
   "model.ownModel": "此对话自己的模型",
@@ -7340,5 +7340,17 @@
   "server.browser.stoppedWaiting": "已停止等待浏览器。",
   "composer.queued.capacityStarter": "排队中。Starter 每个机器人一次运行一个对话，所以这条会在当前对话结束后开始。更大的方案可以运行更多。",
   "composer.queued.seePlans": "查看方案",
-  "settings.threads.starter": "Starter 每个机器人一次运行一个对话，更大的方案可以运行更多。机器人自己发起的工作仍会运行，每个机器人各有一个。"
+  "settings.threads.starter": "Starter 每个机器人一次运行一个对话，更大的方案可以运行更多。机器人自己发起的工作仍会运行，每个机器人各有一个。",
+  "providers.title": "模型提供商",
+  "providers.subtitle": "提供商单独管理，再绑定到 Codex / Claude / DeepSeek。Claude 只支持 Anthropic Messages 协议。",
+  "providers.empty": "还没有提供商",
+  "providers.add": "添加提供商",
+  "providers.saved": "已保存",
+  "providers.bindings": "CLI 绑定（勾选提供商、选协议、勾选要暴露的模型）",
+  "providers.saveBindings": "保存绑定",
+  "providers.addModel": "添加模型",
+  "providers.save": "保存",
+  "providers.cancel": "取消",
+  "providers.fetch": "获取可用模型",
+  "providers.fetched": "从网关拉到 {count} 个模型"
 }
